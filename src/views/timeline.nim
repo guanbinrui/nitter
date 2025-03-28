@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
+import json
 import strutils, strformat, algorithm, uri, options
 import karax/[karaxdsl, vdom]
 
@@ -87,42 +88,61 @@ proc renderTimelineUsers*(results: Result[User]; prefs: Prefs; path=""): VNode =
     else:
       renderNoMore()
 
+proc toJson(tweet: Tweet): JsonNode =
+  result = newJObject()
+  result["id"] = %tweet.id
+  result["text"] = %tweet.text  # Replaced 'content' with 'text'
+  result["user"] = %tweet.user.username
+  if tweet.retweet.isSome:
+    result["retweet"] = tweet.retweet.get.toJson()
+  result["pinned"] = %tweet.pinned
+  result["hasThread"] = %tweet.hasThread
+
+proc toJson(user: User): JsonNode =
+  result = newJObject()
+  result["username"] = %user.username
+  result["displayName"] = %user.username  # Assuming 'displayName' is the 'username' field
+  result["bio"] = %user.bio
+
 proc renderTimelineTweets*(results: Timeline; prefs: Prefs; path: string;
                            pinned=none(Tweet)): VNode =
-  buildHtml(tdiv(class="timeline")):
-    if not results.beginning:
-      renderNewer(results.query, parseUri(path).path)
+  var jsonOutput: JsonNode = newJObject()
+  jsonOutput["beginning"] = %results.beginning
+  jsonOutput["path"] = %path
 
-    if not prefs.hidePins and pinned.isSome:
-      let tweet = get pinned
-      renderTweet(tweet, prefs, path, showThread=tweet.hasThread)
+  if not prefs.hidePins and pinned.isSome:
+    jsonOutput["pinned"] = pinned.get.toJson()
 
-    if results.content.len == 0:
-      if not results.beginning:
-        renderNoMore()
+  if results.content.len == 0:
+    jsonOutput["status"] = newJString(if results.beginning: "none_found" else: "no_more")
+  else:
+    var tweetsArray = newJArray()
+    var retweets: seq[int64]
+
+    for thread in results.content:
+      if thread.len == 1:
+        let tweet = thread[0]
+        let retweetId = if tweet.retweet.isSome: get(tweet.retweet).id else: 0
+
+        if retweetId in retweets or tweet.id in retweets or
+           tweet.pinned and prefs.hidePins:
+          continue
+
+        var hasThread = tweet.hasThread
+        if retweetId != 0 and tweet.retweet.isSome:
+          retweets &= retweetId
+          hasThread = get(tweet.retweet).hasThread
+
+        tweetsArray.add(tweet.toJson())
       else:
-        renderNoneFound()
-    else:
-      var retweets: seq[int64]
+        var threadArray = newJArray()
+        for t in thread:
+          threadArray.add(t.toJson())
+        tweetsArray.add(threadArray)
 
-      for thread in results.content:
-        if thread.len == 1:
-          let
-            tweet = thread[0]
-            retweetId = if tweet.retweet.isSome: get(tweet.retweet).id else: 0
+    jsonOutput["tweets"] = tweetsArray
+    jsonOutput["bottom"] = %results.bottom
 
-          if retweetId in retweets or tweet.id in retweets or
-             tweet.pinned and prefs.hidePins:
-            continue
-
-          var hasThread = tweet.hasThread
-          if retweetId != 0 and tweet.retweet.isSome:
-            retweets &= retweetId
-            hasThread = get(tweet.retweet).hasThread
-          renderTweet(tweet, prefs, path, showThread=hasThread)
-        else:
-          renderThread(thread, prefs, path)
-
-      if results.bottom.len > 0:
-        renderMore(results.query, results.bottom)
-      renderToTop()
+  # Here we return the VNode, not the string
+  buildHtml(tdiv(class="times")):
+    text jsonOutput.pretty()  # Use pretty-printed JSON inside a VNode
